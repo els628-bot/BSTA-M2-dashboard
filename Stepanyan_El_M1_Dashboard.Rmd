@@ -1,0 +1,142 @@
+---
+title: "Circulatory disease deaths in Pennsylvania, 2018--2024"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+    theme: cosmo
+    source_code: embed
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(sf)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(plotly)
+library(leaflet)
+library(DT)
+library(tigris)
+options(tigris_use_cache = TRUE)
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+# data: one row per county and year
+raw <- read_tsv("data/pa_circulatory_deaths_2018_2024.txt",   # tab-separated
+                col_types = cols(`County Code` = "c"))         # GEOID as text
+
+pa <- raw |>
+  filter(!is.na(Year)) |>                        # drop the "Total" rows
+  mutate(GEOID      = `County Code`,
+         county     = sub(" County, PA", "", County),
+         year       = Year,
+         cases      = Deaths,
+         population = Population)
+
+# boundaries
+pa_map <- counties(state = "PA", cb = TRUE, year = 2020,
+                   progress_bar = FALSE) |>
+  st_transform(4326)                             # leaflet wants lon/lat
+
+# one row per area: rate by county, all years pooled
+by_county <- pa |>
+  group_by(GEOID, county) |>
+  summarise(cases = sum(cases), pop = sum(population), .groups = "drop") |>
+  mutate(rate = 1e5 * cases / pop)               # per 100,000 person-years
+
+my_map <- left_join(pa_map, by_county, by = "GEOID")
+
+# join check
+sum(is.na(my_map$rate))                          # should be 0
+my_map$NAME[is.na(my_map$rate)]                  # which areas, if not
+
+# one row per period: Pennsylvania by year
+pa_year <- pa |>
+  group_by(year) |>
+  summarise(cases = sum(cases), pop = sum(population), .groups = "drop") |>
+  mutate(rate = 1e5 * cases / pop, area = "Pennsylvania")
+
+focus <- "Lehigh"
+```
+
+Column {data-width=600}
+-----------------------------------------------------------------------
+
+### Circulatory disease death rate by county, Pennsylvania, 2018--2024 pooled
+
+```{r map}
+breaks <- quantile(by_county$rate, seq(0, 1, 0.2), na.rm = TRUE)   # quintiles
+pal <- colorBin("YlOrRd", domain = by_county$rate, bins = unique(breaks))
+
+leaflet(my_map) |>
+  addProviderTiles(
+    providers$Esri.WorldImagery,
+    options = providerTileOptions(opacity = 0.5)
+  ) |>
+  addPolygons(
+    fillColor = ~pal(rate), fillOpacity = 0.8,
+    color = "white", weight = 1,
+    label = ~sprintf("%s: %.1f per 100,000 (%.0f deaths)",
+                     NAME, rate, cases),
+    highlightOptions = highlightOptions(weight = 2, color = "black",
+                                        bringToFront = TRUE)
+  ) |>
+  addLegend("bottomright", pal = pal, values = ~rate,
+            title = "Rate per 100,000<br>2018-2024",
+            labFormat = labelFormat(digits = 0), opacity = 0.8)
+```
+
+> Rate = deaths / population over 2018--2024, per 100,000 residents per year. Darker red: more circulatory disease deaths per resident; five classes of about 13 counties each.
+
+Column {data-width=400}
+-----------------------------------------------------------------------
+
+### Death rate by year, Pennsylvania and Lehigh County, 2018--2024
+
+```{r timeseries}
+one <- pa |>
+  filter(county == focus) |>
+  mutate(rate = 1e5 * cases / population, area = focus)
+
+cols <- setNames(c("black", "#B2182B"), c("Pennsylvania", focus))
+
+p <- ggplot(bind_rows(pa_year, one), aes(year, rate, colour = area)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.2) +
+  scale_colour_manual(values = cols) +
+  labs(x = NULL, y = "Rate per 100,000", colour = NULL) +
+  theme_minimal()
+
+ggplotly(p)                                      # hover, zoom
+```
+
+> The Pennsylvania rate peaked in 2020 and then fell to its lowest level in 2024; Lehigh County (about 950 deaths a year) stays well below the state, with no clear change.
+
+### Counties, 2018--2024
+
+```{r table}
+by_county |>
+  transmute(County = county, Deaths = cases,
+            Population = pop, Rate = round(rate, 1)) |>
+  arrange(desc(Rate)) |>
+  datatable(rownames = FALSE, options = list(pageLength = 10))
+```
+
+> Population is summed over the seven years (person-years).
+
+Column {data-width=300}
+-----------------------------------------------------------------------
+
+
+AI statement 
+
+I used Claude for parts of my code and debugging. It identified why my CDC WONDER file wouldn’t load (tab-separated text, not Excel) and it helped me adapt the lecture’s Ohio dashboard code to my Pennsylvania data,as some things were different and I was running into some code issues.I ran, knit, and checked the output myself.
+
+### About these data
+
+- **Outcome:** deaths from diseases of the circulatory system (ICD-10 I00--I99), 2018--2024, by year.
+- **Population at risk:** residents of Pennsylvania's 67 counties (Census Bureau estimates, via CDC WONDER).
+- **Rate:** crude death rate, deaths / population x 100,000; on the map and in the table, deaths summed over 2018--2024 divided by the population summed over the same years (person-years), an average annual rate.
+- **Source:** [CDC WONDER, Multiple Cause of Death, 2018--2024, Single Race](https://wonder.cdc.gov/mcd.html); boundaries from the US Census Bureau, via `tigris`.
+- **Areas without data:** none; no counts are suppressed.
+- **Limitation:** the rates are crude, not age-adjusted, so counties with older populations (such as Cameron) look worse partly because of their age structure.
